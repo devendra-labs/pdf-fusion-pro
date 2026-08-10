@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { ArrowLeft, FileUp, X } from "lucide-react";
 import { useState } from "react";
+import { createQpdfRunner } from "qpdf-run";
+
 
 type CompressionLevel =
   | "recommended"
@@ -12,12 +14,12 @@ type CompressionLevel =
 export default function CompressPage() {
   const [file, setFile] = useState<File | null>(null);
   const [error, setError] = useState("");
+
   const [compressionLevel, setCompressionLevel] =
     useState<CompressionLevel>("recommended");
 
   const [isDragging, setIsDragging] = useState(false);
-  const [isCompressing, setIsCompressing] =
-    useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
 
   const [compressedBlob, setCompressedBlob] =
     useState<Blob | null>(null);
@@ -32,7 +34,11 @@ export default function CompressPage() {
       return;
     }
 
-    if (selectedFile.type !== "application/pdf") {
+    const isPdf =
+      selectedFile.type === "application/pdf" ||
+      selectedFile.name.toLowerCase().endsWith(".pdf");
+
+    if (!isPdf) {
       setError("Please select a valid PDF file.");
       return;
     }
@@ -46,7 +52,6 @@ export default function CompressPage() {
 
   const handleDrop = (event: React.DragEvent) => {
     event.preventDefault();
-
     setIsDragging(false);
 
     const droppedFile =
@@ -83,7 +88,7 @@ export default function CompressPage() {
   const getCompressionDescription = () => {
     switch (compressionLevel) {
       case "maximum":
-        return "Stronger structural optimization for a smaller file.";
+        return "Stronger optimization for a smaller PDF.";
 
       case "high-quality":
         return "Lighter optimization with less structural rewriting.";
@@ -93,77 +98,198 @@ export default function CompressPage() {
     }
   };
 
-  const handleCompress = async () => {
-    if (!file) {
-      setError("Please select a PDF file first.");
-      return;
+const handleCompress = async () => {
+  if (!file) {
+    setError("Please select a PDF file first.");
+    return;
+  }
+
+  let qpdf: Awaited<
+    ReturnType<typeof createQpdfRunner>
+  > | null = null;
+
+  try {
+    setIsCompressing(true);
+    setError("");
+    setCompressedBlob(null);
+    setCompressedSize(null);
+    setIsComplete(false);
+
+    console.log("[client] Starting browser PDF compression...");
+    console.log("[client] File:", file.name);
+    console.log("[client] Size:", file.size);
+    console.log(
+      "[client] Compression level:",
+      compressionLevel,
+    );
+
+    const pdfBytes = new Uint8Array(
+      await file.arrayBuffer(),
+    );
+
+    console.log(
+      "[client] PDF bytes loaded:",
+      pdfBytes.length,
+    );
+
+  qpdf = await createQpdfRunner({
+  timeoutMs: 120000,
+  workerUrl: new URL(
+    "/qpdf/worker.js",
+    window.location.origin,
+  ).href,
+  qpdfJsUrl: new URL(
+    "/qpdf/lib-qpdf.js",
+    window.location.origin,
+  ).href,
+  wasmUrl: new URL(
+    "/qpdf/qpdf.wasm",
+    window.location.origin,
+  ).href,
+});
+
+    console.log("[client] qpdf WASM initialized.");
+
+    let args: string[];
+
+    switch (compressionLevel) {
+      case "maximum":
+        args = [
+          "--compress-streams=y",
+          "--decode-level=generalized",
+          "--recompress-flate",
+          "--compression-level=9",
+          "--object-streams=generate",
+          "--",
+          "input.pdf",
+          "compressed.pdf",
+        ];
+        break;
+
+      case "high-quality":
+        args = [
+          "--compress-streams=y",
+          "--object-streams=generate",
+          "--",
+          "input.pdf",
+          "compressed.pdf",
+        ];
+        break;
+
+      default:
+        args = [
+          "--compress-streams=y",
+          "--decode-level=generalized",
+          "--recompress-flate",
+          "--object-streams=generate",
+          "--",
+          "input.pdf",
+          "compressed.pdf",
+        ];
+        break;
     }
 
-    try {
-      setIsCompressing(true);
-      setError("");
-      setCompressedBlob(null);
-      setCompressedSize(null);
-      setIsComplete(false);
+    console.log("[client] Running qpdf WASM...");
 
-      const formData = new FormData();
-      formData.append("file", file);
+    const result = await qpdf.run({
+      inputs: {
+        "input.pdf": pdfBytes,
+      },
+      args,
+      outputs: ["compressed.pdf"],
+    });
 
-      const response = await fetch("/api/compress", {
-        method: "POST",
-        body: formData,
-      });
+    console.log(
+      "[client] qpdf exit code:",
+      result.exitCode,
+    );
 
-      if (!response.ok) {
-        let message =
-          "Something went wrong while compressing the PDF.";
+    console.log(
+      "[client] qpdf duration:",
+      result.durationMs,
+      "ms",
+    );
 
-        try {
-          const data = await response.json();
+    if (result.stderr.length > 0) {
+      console.log(
+        "[client] qpdf stderr:",
+        result.stderr,
+      );
+    }
 
-          if (data?.error) {
-            message = data.error;
+    if (result.warnings.length > 0) {
+      console.warn(
+        "[client] qpdf warnings:",
+        result.warnings,
+      );
+    }
 
-            if (data?.details) {
-              console.error(
-                "[QPDF]",
-                data.details,
-              );
-            }
-          }
-        } catch {
-          // Ignore JSON parsing errors.
-        }
+    if (!result.ok) {
+      throw new Error(
+        result.stderr.join("\n") ||
+          "qpdf compression failed.",
+      );
+    }
 
-        throw new Error(message);
-      }
+    const outputBytes =
+      result.outputs["compressed.pdf"];
 
-      const blob = await response.blob();
+    if (!outputBytes || outputBytes.length === 0) {
+      throw new Error(
+        "qpdf produced an empty PDF.",
+      );
+    }
 
-      if (blob.size === 0) {
-        throw new Error(
-          "The compressed PDF is empty.",
+    const outputBlob = new Blob(
+  [new Uint8Array(outputBytes)],
+  {
+    type: "application/pdf",
+  },
+);
+
+    console.log(
+      "[client] Compressed PDF received:",
+      outputBlob.size,
+      "bytes",
+    );
+
+    setCompressedBlob(outputBlob);
+    setCompressedSize(outputBlob.size);
+    setIsComplete(true);
+
+    console.log(
+      "[client] Browser PDF compression completed successfully.",
+    );
+  } catch (err) {
+    console.error(
+      "[client] Browser PDF compression error:",
+      err,
+    );
+
+    setError(
+      err instanceof Error
+        ? err.message
+        : "Something went wrong while compressing the PDF.",
+    );
+  } finally {
+    if (qpdf) {
+      try {
+        await qpdf.destroy();
+
+        console.log(
+          "[client] qpdf WASM worker destroyed.",
+        );
+      } catch (destroyError) {
+        console.error(
+          "[client] qpdf cleanup error:",
+          destroyError,
         );
       }
-
-      setCompressedBlob(blob);
-      setCompressedSize(blob.size);
-      setIsComplete(true);
-    } catch (err) {
-      console.error(
-        "[browser] PDF compression error:",
-        err,
-      );
-
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Something went wrong while compressing the PDF.",
-      );
-    } finally {
-      setIsCompressing(false);
     }
-  };
+
+    setIsCompressing(false);
+  }
+};
 
   const handleDownload = () => {
     if (!compressedBlob || !file) {
@@ -184,7 +310,9 @@ export default function CompressPage() {
     );
 
     document.body.appendChild(link);
+
     link.click();
+
     link.remove();
 
     setTimeout(() => {
@@ -222,15 +350,17 @@ export default function CompressPage() {
     compressedSize < file.size;
 
   return (
-    <main className="min-h-screen">
-      <div className="mx-auto max-w-5xl px-6 py-8">
-        <Link
-          href="/"
-          className="inline-flex items-center gap-2 text-sm text-white/50 transition hover:text-white"
-        >
-          <ArrowLeft size={16} />
-          Back to home
-        </Link>
+    <main className="min-h-screen bg-[#050505] px-6 pb-20 text-white">
+      <div className="mx-auto max-w-5xl">
+        <div className="pt-8">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-2 text-sm text-white/50 transition-colors hover:text-white"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to home
+          </Link>
+        </div>
 
         <div className="mt-16 text-center">
           <p className="mb-3 text-sm font-medium uppercase tracking-[0.2em] text-white/40">
@@ -285,7 +415,7 @@ export default function CompressPage() {
 
                 <input
                   type="file"
-                  accept="application/pdf"
+                  accept="application/pdf,.pdf"
                   className="hidden"
                   onChange={(event) => {
                     handleFile(
@@ -336,7 +466,7 @@ export default function CompressPage() {
 
                 <input
                   type="file"
-                  accept="application/pdf"
+                  accept="application/pdf,.pdf"
                   className="hidden"
                   disabled={isCompressing}
                   onChange={(event) => {
@@ -489,9 +619,7 @@ export default function CompressPage() {
                     </p>
 
                     <p className="mt-1 text-lg font-medium text-white/80">
-                      {formatFileSize(
-                        file.size,
-                      )}
+                      {formatFileSize(file.size)}
                     </p>
                   </div>
 
@@ -539,9 +667,7 @@ export default function CompressPage() {
 
                   <button
                     type="button"
-                    onClick={
-                      handleCompressAnother
-                    }
+                    onClick={handleCompressAnother}
                     className="inline-flex h-11 items-center justify-center rounded-xl border border-white/10 bg-white/[0.05] px-6 text-sm font-medium text-white transition-all hover:bg-white/[0.1]"
                   >
                     Compress another PDF

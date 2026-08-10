@@ -57,12 +57,6 @@ export async function POST(request: Request) {
       "bytes",
     );
 
-    /*
-     * Create the extractor inside the request.
-     *
-     * This avoids keeping a shared PDFExtract instance
-     * between requests on the server.
-     */
     const pdfExtract = new PDFExtract();
 
     const data = await new Promise<{
@@ -104,7 +98,11 @@ export async function POST(request: Request) {
 
     const paragraphs: Paragraph[] = [];
 
-    for (let pageIndex = 0; pageIndex < data.pages.length; pageIndex++) {
+    for (
+      let pageIndex = 0;
+      pageIndex < data.pages.length;
+      pageIndex++
+    ) {
       const page = data.pages[pageIndex];
 
       const lines = new Map<number, string[]>();
@@ -156,11 +154,9 @@ export async function POST(request: Request) {
         );
       }
 
-      /*
-       * Add a page break only between PDF pages.
-       * This avoids an unnecessary blank page at the end.
-       */
-      if (pageIndex < data.pages.length - 1) {
+      if (
+        pageIndex < data.pages.length - 1
+      ) {
         paragraphs.push(
           new Paragraph({
             text: "",
@@ -196,7 +192,10 @@ export async function POST(request: Request) {
     const docxBuffer =
       await Packer.toBuffer(document);
 
-    if (!docxBuffer || docxBuffer.length === 0) {
+    if (
+      !docxBuffer ||
+      docxBuffer.length === 0
+    ) {
       throw new Error(
         "The generated Word document is empty.",
       );
@@ -225,9 +224,12 @@ export async function POST(request: Request) {
         headers: {
           "Content-Type":
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+
           "Content-Disposition":
             `attachment; filename="${outputName}"`,
-          "Cache-Control": "no-store",
+
+          "Cache-Control":
+            "no-store",
         },
       },
     );

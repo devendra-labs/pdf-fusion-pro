@@ -8,10 +8,10 @@ import {
 
 export const runtime = "nodejs";
 
-const pdfExtract = new PDFExtract();
-
 export async function POST(request: Request) {
   try {
+    console.log("[PDF to Word] Request received.");
+
     const formData = await request.formData();
     const uploadedFile = formData.get("file");
 
@@ -24,7 +24,11 @@ export async function POST(request: Request) {
       );
     }
 
-    if (uploadedFile.type !== "application/pdf") {
+    const isPdf =
+      uploadedFile.type === "application/pdf" ||
+      uploadedFile.name.toLowerCase().endsWith(".pdf");
+
+    if (!isPdf) {
       return Response.json(
         {
           error: "Only PDF files are supported.",
@@ -46,21 +50,27 @@ export async function POST(request: Request) {
       );
     }
 
+    console.log(
+      "[PDF to Word] Input:",
+      uploadedFile.name,
+      pdfBuffer.length,
+      "bytes",
+    );
+
     /*
-     * pdf.js-extract expects a file path or
-     * PDF data depending on the method.
+     * Create the extractor inside the request.
      *
-     * We use the buffer directly so the user
-     * does not need to install anything.
+     * This avoids keeping a shared PDFExtract instance
+     * between requests on the server.
      */
+    const pdfExtract = new PDFExtract();
+
     const data = await new Promise<{
       pages: Array<{
-        content: Array<{
-          str: string;
-          x: number;
-          y: number;
-          width: number;
-          height: number;
+        content?: Array<{
+          str?: string;
+          x?: number;
+          y?: number;
         }>;
       }>;
     }>((resolve, reject) => {
@@ -76,7 +86,7 @@ export async function POST(request: Request) {
           if (!result) {
             reject(
               new Error(
-                "Unable to extract text from PDF.",
+                "Unable to extract text from the PDF.",
               ),
             );
             return;
@@ -87,23 +97,33 @@ export async function POST(request: Request) {
       );
     });
 
+    console.log(
+      "[PDF to Word] Pages:",
+      data.pages.length,
+    );
+
     const paragraphs: Paragraph[] = [];
 
-    for (const page of data.pages) {
-      const lines = new Map<
-        number,
-        string[]
-      >();
+    for (let pageIndex = 0; pageIndex < data.pages.length; pageIndex++) {
+      const page = data.pages[pageIndex];
 
-      for (const item of page.content) {
+      const lines = new Map<number, string[]>();
+
+      for (const item of page.content ?? []) {
+        const text = String(item.str ?? "").trim();
+
+        if (!text) {
+          continue;
+        }
+
         const y =
-          Math.round(item.y * 10) / 10;
+          Math.round(Number(item.y ?? 0) * 10) / 10;
 
         if (!lines.has(y)) {
           lines.set(y, []);
         }
 
-        lines.get(y)!.push(item.str);
+        lines.get(y)!.push(text);
       }
 
       const sortedLines = Array.from(
@@ -136,17 +156,18 @@ export async function POST(request: Request) {
         );
       }
 
-      // Page separation
-      paragraphs.push(
-        new Paragraph({
-          children: [
-            new TextRun({
-              text: "",
-            }),
-          ],
-          pageBreakBefore: true,
-        }),
-      );
+      /*
+       * Add a page break only between PDF pages.
+       * This avoids an unnecessary blank page at the end.
+       */
+      if (pageIndex < data.pages.length - 1) {
+        paragraphs.push(
+          new Paragraph({
+            text: "",
+            pageBreakBefore: true,
+          }),
+        );
+      }
     }
 
     if (paragraphs.length === 0) {
@@ -158,6 +179,10 @@ export async function POST(request: Request) {
         { status: 422 },
       );
     }
+
+    console.log(
+      "[PDF to Word] Creating DOCX...",
+    );
 
     const document = new Document({
       sections: [
@@ -171,6 +196,12 @@ export async function POST(request: Request) {
     const docxBuffer =
       await Packer.toBuffer(document);
 
+    if (!docxBuffer || docxBuffer.length === 0) {
+      throw new Error(
+        "The generated Word document is empty.",
+      );
+    }
+
     const originalName =
       uploadedFile.name.replace(
         /\.pdf$/i,
@@ -179,6 +210,13 @@ export async function POST(request: Request) {
 
     const outputName =
       `${originalName}.docx`;
+
+    console.log(
+      "[PDF to Word] Output:",
+      outputName,
+      docxBuffer.length,
+      "bytes",
+    );
 
     return new Response(
       new Uint8Array(docxBuffer),

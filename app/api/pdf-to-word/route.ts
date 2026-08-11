@@ -1,10 +1,10 @@
-import { PDFExtract } from "pdf.js-extract";
 import {
   Document,
   Packer,
   Paragraph,
   TextRun,
 } from "docx";
+import { PDFExtract } from "pdf.js-extract";
 
 export const runtime = "nodejs";
 
@@ -57,6 +57,13 @@ export async function POST(request: Request) {
       "bytes",
     );
 
+    /*
+     * IMPORTANT:
+     * Use pdf.js-extract directly.
+     *
+     * This avoids the browser PDF worker mechanism.
+     * fake-worker mechanism completely.
+     */
     const pdfExtract = new PDFExtract();
 
     const data = await new Promise<{
@@ -115,7 +122,9 @@ export async function POST(request: Request) {
         }
 
         const y =
-          Math.round(Number(item.y ?? 0) * 10) / 10;
+          Math.round(
+            Number(item.y ?? 0) * 10,
+          ) / 10;
 
         if (!lines.has(y)) {
           lines.set(y, []);
@@ -124,6 +133,10 @@ export async function POST(request: Request) {
         lines.get(y)!.push(text);
       }
 
+      /*
+       * PDF coordinate system:
+       * sort from top to bottom.
+       */
       const sortedLines = Array.from(
         lines.entries(),
       ).sort(
@@ -154,8 +167,12 @@ export async function POST(request: Request) {
         );
       }
 
+      /*
+       * Add page break only between PDF pages.
+       */
       if (
-        pageIndex < data.pages.length - 1
+        pageIndex <
+        data.pages.length - 1
       ) {
         paragraphs.push(
           new Paragraph({
@@ -228,8 +245,7 @@ export async function POST(request: Request) {
           "Content-Disposition":
             `attachment; filename="${outputName}"`,
 
-          "Cache-Control":
-            "no-store",
+          "Cache-Control": "no-store",
         },
       },
     );

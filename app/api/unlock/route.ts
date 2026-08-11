@@ -1,107 +1,20 @@
 import { NextRequest } from "next/server";
-import { promises as fs } from "fs";
-import os from "os";
-import path from "path";
-import crypto from "crypto";
-import { spawn } from "child_process";
+import { decryptPDF } from "@pdfsmaller/pdf-decrypt";
 
 export const runtime = "nodejs";
 
-function getQpdfPath(): string {
-  return process.env.QPDF_PATH || "qpdf";
-}
-
-function runQpdf(
-  inputPath: string,
-  outputPath: string,
-  password: string,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const qpdfPath = getQpdfPath();
-
-    const args = [
-      `--password=${password}`,
-      "--decrypt",
-      "--",
-      inputPath,
-      outputPath,
-    ];
-
-    console.log("[Unlock PDF] Starting qpdf");
-    console.log("[Unlock PDF] Executable:", qpdfPath);
-
-    const qpdfProcess = spawn(
-  /* turbopackIgnore: true */ qpdfPath,
-  args,
-  {
-    windowsHide: true,
-  },
-);
-
-    let stdout = "";
-    let stderr = "";
-
-    qpdfProcess.stdout.on("data", (data: Buffer) => {
-      stdout += data.toString();
-    });
-
-    qpdfProcess.stderr.on("data", (data: Buffer) => {
-      stderr += data.toString();
-    });
-
-    qpdfProcess.on("error", (error) => {
-      console.error(
-        "[Unlock PDF] Failed to start qpdf:",
-        error,
-      );
-
-      reject(error);
-    });
-
-    qpdfProcess.on("close", (code) => {
-      console.log(
-        "[Unlock PDF] qpdf exited with code:",
-        code,
-      );
-
-      if (stdout) {
-        console.log(
-          "[Unlock PDF] stdout:",
-          stdout,
-        );
-      }
-
-      if (stderr) {
-        console.log(
-          "[Unlock PDF] stderr:",
-          stderr,
-        );
-      }
-
-      if (code === 0) {
-        resolve();
-        return;
-      }
-
-      reject(
-        new Error(
-          stderr.trim() ||
-            `qpdf exited with code ${code ?? "unknown"}`,
-        ),
-      );
-    });
-  });
-}
-
 export async function POST(request: NextRequest) {
-  let tempDir: string | null = null;
-
   try {
+    console.log("[Unlock PDF] Request received.");
+
     const formData = await request.formData();
 
     const file = formData.get("file");
     const password = formData.get("password");
 
+    // -----------------------------
+    // Validate file
+    // -----------------------------
     if (!(file instanceof File)) {
       return Response.json(
         {
@@ -113,6 +26,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // -----------------------------
+    // Validate password
+    // -----------------------------
     if (typeof password !== "string") {
       return Response.json(
         {
@@ -135,6 +51,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // -----------------------------
+    // Validate PDF
+    // -----------------------------
     const fileName = file.name || "document.pdf";
 
     if (
@@ -151,83 +70,95 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    tempDir = await fs.mkdtemp(
-      path.join(
-        os.tmpdir(),
-        "pdf-fusion-unlock-",
-      ),
+    console.log(
+      "[Unlock PDF] Input:",
+      fileName,
+      file.size,
+      "bytes",
     );
 
-    const id = crypto.randomUUID();
-
-    const inputPath = path.join(
-      tempDir,
-      `${id}-input.pdf`,
-    );
-
-    const outputPath = path.join(
-      tempDir,
-      `${id}-unlocked.pdf`,
-    );
-
-    const inputBuffer = Buffer.from(
+    // -----------------------------
+    // Read uploaded PDF
+    // -----------------------------
+    const inputBytes = new Uint8Array(
       await file.arrayBuffer(),
     );
 
-    await fs.writeFile(
-      inputPath,
-      inputBuffer,
-    );
-
-    console.log(
-      "[Unlock PDF] Input PDF saved:",
-      inputPath,
-    );
-
-    await runQpdf(
-      inputPath,
-      outputPath,
-      password,
-    );
-
-    const outputBuffer = await fs.readFile(
-      outputPath,
-    );
-
-    if (!outputBuffer.length) {
-      throw new Error(
-        "qpdf generated an empty output file.",
+    if (inputBytes.length === 0) {
+      return Response.json(
+        {
+          error: "The uploaded PDF is empty.",
+        },
+        {
+          status: 400,
+        },
       );
     }
 
+    console.log(
+      "[Unlock PDF] Decrypting PDF...",
+    );
+
+    // -----------------------------
+    // Decrypt PDF
+    // -----------------------------
+    const decryptedBytes = await decryptPDF(
+      inputBytes,
+      password,
+    );
+
+    if (
+      !decryptedBytes ||
+      decryptedBytes.length === 0
+    ) {
+      throw new Error(
+        "Decryption returned an empty PDF.",
+      );
+    }
+
+    console.log(
+      "[Unlock PDF] Decryption successful.",
+      decryptedBytes.length,
+      "bytes",
+    );
+
+    // -----------------------------
+    // Safe download filename
+    // -----------------------------
     const safeName = fileName
       .replace(/\.pdf$/i, "")
-      .replace(/[^a-zA-Z0-9-_]/g, "_")
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
       .slice(0, 100);
 
     const downloadName =
       `${safeName || "document"}-unlocked.pdf`;
 
     console.log(
-      "[Unlock PDF] Unlock successful:",
+      "[Unlock PDF] Download:",
       downloadName,
     );
 
-    return new Response(outputBuffer, {
-      status: 200,
+    // -----------------------------
+    // Return unlocked PDF
+    // -----------------------------
+    return new Response(
+      Buffer.from(decryptedBytes),
+      {
+        status: 200,
 
-      headers: {
-        "Content-Type": "application/pdf",
+        headers: {
+          "Content-Type": "application/pdf",
 
-        "Content-Disposition":
-          `attachment; filename="${downloadName}"`,
+          "Content-Disposition":
+            `attachment; filename="${downloadName}"`,
 
-        "Content-Length":
-          outputBuffer.length.toString(),
+          "Content-Length":
+            decryptedBytes.length.toString(),
 
-        "Cache-Control": "no-store",
+          "Cache-Control": "no-store",
+        },
       },
-    });
+    );
   } catch (error) {
     console.error(
       "[Unlock PDF] ERROR:",
@@ -239,34 +170,50 @@ export async function POST(request: NextRequest) {
         ? error.message
         : String(error);
 
+    // Wrong password
     if (
-      message.includes("ENOENT") ||
-      message.includes("spawn qpdf")
+      message
+        .toLowerCase()
+        .includes("incorrect password")
     ) {
       return Response.json(
         {
           error:
-            "qpdf was not found. Make sure qpdf is installed and QPDF_PATH is configured correctly.",
+            "Incorrect PDF password. Please enter the correct password.",
         },
         {
-          status: 500,
+          status: 400,
         },
       );
     }
 
-    /*
-     * qpdf returns an error when the password is wrong
-     * or the PDF cannot be decrypted.
-     */
+    // PDF is not encrypted
     if (
-      message.toLowerCase().includes("password") ||
-      message.toLowerCase().includes("decrypt") ||
-      message.toLowerCase().includes("encryption")
+      message
+        .toLowerCase()
+        .includes("not encrypted")
     ) {
       return Response.json(
         {
           error:
-            "Incorrect password or this PDF could not be decrypted.",
+            "This PDF is not password protected.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // Unsupported encryption
+    if (
+      message
+        .toLowerCase()
+        .includes("unsupported encryption")
+    ) {
+      return Response.json(
+        {
+          error:
+            "This PDF uses an unsupported encryption method.",
         },
         {
           status: 400,
@@ -277,29 +224,12 @@ export async function POST(request: NextRequest) {
     return Response.json(
       {
         error:
-          "Unable to unlock this PDF. Please check the password and make sure the PDF is valid.",
+          message ||
+          "Unable to unlock this PDF.",
       },
       {
-        status: 400,
+        status: 500,
       },
     );
-  } finally {
-    if (tempDir) {
-      try {
-        await fs.rm(tempDir, {
-          recursive: true,
-          force: true,
-        });
-
-        console.log(
-          "[Unlock PDF] Temporary files cleaned.",
-        );
-      } catch (cleanupError) {
-        console.error(
-          "[Unlock PDF] Cleanup error:",
-          cleanupError,
-        );
-      }
-    }
   }
 }

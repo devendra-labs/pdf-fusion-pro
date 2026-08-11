@@ -97,11 +97,6 @@ export default function Footer() {
             © 2026 PDF Fusion Pro. All rights
             reserved.
           </p>
-
-          <p>
-            Built with Next.js, TypeScript &
-            open-source tools.
-          </p>
         </div>
       </div>
     </footer>
